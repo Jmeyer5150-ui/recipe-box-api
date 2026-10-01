@@ -8,6 +8,7 @@ That is the point: you will add both, lesson by lesson, in Units 2 and 3.
 import sqlite3
 
 from flask import Flask, g, jsonify, request
+from werkzeug.security import generate_password_hash
 
 DATABASE = "recipes.db"
 
@@ -38,6 +39,12 @@ def recipe_to_dict(row):
         "is_public": bool(row["is_public"]),
     }
 
+def user_to_dict(row):
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+    }
 
 @app.get("/")
 def hello():
@@ -84,6 +91,48 @@ def create_recipe():
         "SELECT * FROM recipes WHERE id = ?", (cur.lastrowid,)
     ).fetchone()
     return jsonify(recipe_to_dict(row)), 201
+
+@app.post("/users")
+def register_user():
+    data = request.get_json(silent=True)
+
+    # 1. Validate input
+    if (
+        not data
+        or not data.get("username")
+        or not data.get("email")
+        or not data.get("password")
+    ):
+        return jsonify({"error": "username, email, and password are required"}), 400
+
+    # 2. Hash the password
+    password_hash = generate_password_hash(
+    data["password"],
+    method="pbkdf2:sha256",
+)
+
+    db = get_db()
+
+    try:
+        # 3. Insert user with hash ONLY
+        cur = db.execute(
+            """
+            INSERT INTO users (username, email, password_hash)
+            VALUES (?, ?, ?)
+            """,
+            (data["username"], data["email"], password_hash),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        # 4. Duplicate username or email → 409
+        return jsonify({"error": "username or email already in use"}), 409
+
+    # 5. Fetch created user and return safe JSON
+    row = db.execute(
+        "SELECT id, username, email FROM users WHERE id = ?", (cur.lastrowid,)
+    ).fetchone()
+
+    return jsonify(user_to_dict(row)), 201
 
 
 @app.patch("/recipes/<int:recipe_id>")
