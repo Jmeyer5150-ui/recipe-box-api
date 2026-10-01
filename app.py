@@ -6,20 +6,18 @@ That is the point: you will add both, lesson by lesson, in Units 2 and 3.
 """
 
 import sqlite3
-
-from flask import Flask, g, jsonify, request
-from werkzeug.security import generate_password_hash
-
-DATABASE = "recipes.db"
+from flask import Flask, request, jsonify, g
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+DATABASE = "recipes.db"  # change if your DB file has a different name
 
 
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DATABASE)
         g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -30,15 +28,6 @@ def close_db(exception):
         db.close()
 
 
-def recipe_to_dict(row):
-    return {
-        "id": row["id"],
-        "title": row["title"],
-        "ingredients": row["ingredients"],
-        "instructions": row["instructions"],
-        "is_public": bool(row["is_public"]),
-    }
-
 def user_to_dict(row):
     return {
         "id": row["id"],
@@ -46,51 +35,6 @@ def user_to_dict(row):
         "email": row["email"],
     }
 
-@app.get("/")
-def hello():
-    return jsonify({"message": "Recipe Box API", "recipes": "/recipes"})
-
-
-@app.get("/recipes")
-def list_recipes():
-    rows = get_db().execute("SELECT * FROM recipes ORDER BY id").fetchall()
-    return jsonify([recipe_to_dict(r) for r in rows])
-
-
-@app.get("/recipes/<int:recipe_id>")
-def get_recipe(recipe_id):
-    row = get_db().execute(
-        "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
-    ).fetchone()
-    if row is None:
-        return jsonify({"error": "recipe not found"}), 404
-    return jsonify(recipe_to_dict(row))
-
-
-@app.post("/recipes")
-def create_recipe():
-    data = request.get_json(silent=True)
-    if not data or not data.get("title") or not data.get("ingredients"):
-        return jsonify({"error": "title and ingredients are required"}), 400
-    db = get_db()
-    try:
-        cur = db.execute(
-            "INSERT INTO recipes (title, ingredients, instructions, is_public)"
-            " VALUES (?, ?, ?, ?)",
-            (
-                data["title"],
-                data["ingredients"],
-                data.get("instructions", ""),
-                1 if data.get("is_public", True) else 0,
-            ),
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "a recipe with that title already exists"}), 409
-    row = db.execute(
-        "SELECT * FROM recipes WHERE id = ?", (cur.lastrowid,)
-    ).fetchone()
-    return jsonify(recipe_to_dict(row)), 201
 
 @app.post("/users")
 def register_user():
@@ -107,9 +51,9 @@ def register_user():
 
     # 2. Hash the password
     password_hash = generate_password_hash(
-    data["password"],
-    method="pbkdf2:sha256",
-)
+        data["password"],
+        method="pbkdf2:sha256",
+    )
 
     db = get_db()
 
@@ -135,47 +79,51 @@ def register_user():
     return jsonify(user_to_dict(row)), 201
 
 
-@app.patch("/recipes/<int:recipe_id>")
-def update_recipe(recipe_id):
+@app.post("/login")
+def login():
     data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "a JSON body is required"}), 400
-    fields, values = [], []
-    for column in ("title", "ingredients", "instructions"):
-        if column in data:
-            fields.append(f"{column} = ?")
-            values.append(data[column])
-    if "is_public" in data:
-        fields.append("is_public = ?")
-        values.append(1 if data["is_public"] else 0)
-    if not fields:
-        return jsonify({"error": "nothing to update"}), 400
-    values.append(recipe_id)
+
+    # 1. Validate input
+    if (
+        not data
+        or not data.get("username")
+        or not data.get("password")
+    ):
+        return jsonify({"error": "username and password are required"}), 400
+
     db = get_db()
-    try:
-        cur = db.execute(
-            f"UPDATE recipes SET {', '.join(fields)} WHERE id = ?", values
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "a recipe with that title already exists"}), 409
-    if cur.rowcount == 0:
-        return jsonify({"error": "recipe not found"}), 404
+
+    # 2. Look up user by username (parameterized)
     row = db.execute(
-        "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
+        """
+        SELECT id, username, email, password_hash
+        FROM users
+        WHERE username = ?
+        """,
+        (data["username"],),
     ).fetchone()
-    return jsonify(recipe_to_dict(row))
 
+    # Prepare a single generic failure response
+    generic_error = jsonify({"error": "Invalid username or password"}), 401
 
-@app.delete("/recipes/<int:recipe_id>")
-def delete_recipe(recipe_id):
-    db = get_db()
-    cur = db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
-    db.commit()
-    if cur.rowcount == 0:
-        return jsonify({"error": "recipe not found"}), 404
-    return "", 204
+    # 3. If no such user, fail generically
+    if row is None:
+        return generic_error
+
+    # 4. Verify password against stored hash
+    if not check_password_hash(row["password_hash"], data["password"]):
+        return generic_error
+
+    # 5. On success, return safe identity (no password_hash)
+    user = {
+        "id": row["id"],
+        "username": row["username"],
+        "email": row["email"],
+    }
+
+    return jsonify(user), 200
 
 
 if __name__ == "__main__":
     app.run(debug=True)
+
